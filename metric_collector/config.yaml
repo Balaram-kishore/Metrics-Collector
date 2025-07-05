@@ -1,0 +1,11 @@
+# Cloud endpoint (we'll build this in Stage 2)
+endpoint:
+  url: "http://localhost:8000/ingest"
+
+# How often to collect metrics (seconds)
+interval_seconds: 30
+
+# Alert thresholds
+thresholds:
+  cpu: 80  # Alert if CPU > 80%
+  memory: 90  # Alert if memory > 90%

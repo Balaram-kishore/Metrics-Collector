@@ -1,0 +1,12 @@
+[Unit]
+Description=Linux Metric Collector Daemon
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/path/to/linux-monitoring
+ExecStart=/usr/bin/python3 /path/to/linux-monitoring/metric_collector/collector.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
