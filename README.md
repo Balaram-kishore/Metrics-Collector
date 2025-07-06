@@ -159,6 +159,20 @@ email:
 
 ## 🚀 Usage
 
+### 🎯 Live Demo Setup
+
+For a quick live demonstration on Ubuntu Linux, see the **[Live Demo Installation Guide for Ubuntu Linux.md](Live%20Demo%20Installation%20Guide%20for%20Ubuntu%20Linux.md)** which provides:
+
+- **5-minute automated setup** for live demos
+- **Step-by-step demo script** with talking points
+- **Troubleshooting guide** for common demo issues
+- **One-command installation** for quick setup
+
+**Quick Demo Command:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/your-org/metrics-collector-linux/main/scripts/demo-setup.sh | sudo bash
+```
+
 ### Starting Services
 
 ```bash
