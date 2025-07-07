@@ -61,127 +61,259 @@ class MetricCollector:
             sys.exit(1)
 
     def _setup_logging(self):
-        """Setup structured logging with file and console output."""
+        """Setup structured JSON logging with timestamps and levels as per assignment requirements."""
         log_level = getattr(logging, self.config.get('log_level', 'INFO').upper())
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
         # Create logs directory if it doesn't exist
         log_dir = Path('logs')
         log_dir.mkdir(exist_ok=True)
 
-        # Configure logging
-        logging.basicConfig(
-            level=log_level,
-            format=log_format,
-            handlers=[
-                logging.FileHandler(log_dir / 'metrics_collector.log'),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
+        # Custom JSON formatter for structured logging
+        class JSONFormatter(logging.Formatter):
+            def format(self, record):
+                log_entry = {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": record.getMessage(),
+                    "module": record.module,
+                    "function": record.funcName,
+                    "line": record.lineno
+                }
+
+                # Add exception info if present
+                if record.exc_info:
+                    log_entry["exception"] = self.formatException(record.exc_info)
+
+                # Add extra fields if present
+                if hasattr(record, 'hostname'):
+                    log_entry["hostname"] = record.hostname
+                if hasattr(record, 'metric_type'):
+                    log_entry["metric_type"] = record.metric_type
+                if hasattr(record, 'duration'):
+                    log_entry["duration_ms"] = record.duration
+
+                return json.dumps(log_entry)
+
+        # Configure handlers with JSON formatting
+        file_handler = logging.FileHandler(log_dir / 'metrics_collector.log')
+        file_handler.setFormatter(JSONFormatter())
+
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(JSONFormatter())
+
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+        root_logger.handlers.clear()
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
 
         self.logger = logging.getLogger(__name__)
+        self.logger.info("Structured JSON logging initialized", extra={
+            "hostname": psutil.os.uname().nodename,
+            "log_level": logging.getLevelName(log_level)
+        })
 
     def collect_metrics(self) -> Dict[str, Any]:
-        """Gather comprehensive system metrics using psutil."""
-        try:
-            timestamp = datetime.utcnow().isoformat()
+        """Gather comprehensive system metrics as per assignment requirements."""
+        start_time = time.time()
+        hostname = psutil.os.uname().nodename
 
-            # CPU metrics
+        try:
+            timestamp = datetime.utcnow().isoformat() + "Z"
+
+            # CPU metrics - Assignment requires per-core and overall utilization
+            self.logger.debug("Collecting CPU metrics", extra={"hostname": hostname, "metric_type": "cpu"})
+
+            # Get per-core CPU percentages (assignment requirement)
+            cpu_per_core = psutil.cpu_percent(interval=1, percpu=True)
+            cpu_overall = psutil.cpu_percent(interval=0)  # Overall CPU
+
             cpu_data = {
-                "percent": psutil.cpu_percent(interval=1),
-                "count": psutil.cpu_count(),
-                "count_logical": psutil.cpu_count(logical=True),
-                "load_avg": os.getloadavg() if hasattr(os, 'getloadavg') else None
+                "overall_percent": cpu_overall,
+                "per_core_percent": cpu_per_core,
+                "core_count_physical": psutil.cpu_count(logical=False),
+                "core_count_logical": psutil.cpu_count(logical=True),
+                "load_average": list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
+                "cpu_times": dict(psutil.cpu_times()._asdict()),
+                "cpu_stats": dict(psutil.cpu_stats()._asdict()) if hasattr(psutil, 'cpu_stats') else None
             }
 
-            # Memory metrics
+            # Memory metrics - Assignment requires total, used, free, % used
+            self.logger.debug("Collecting memory metrics", extra={"hostname": hostname, "metric_type": "memory"})
+
             memory = psutil.virtual_memory()
             memory_data = {
-                "total": memory.total,
-                "available": memory.available,
-                "percent": memory.percent,
-                "used": memory.used,
-                "free": memory.free,
-                "buffers": getattr(memory, 'buffers', 0),
-                "cached": getattr(memory, 'cached', 0)
+                "total_bytes": memory.total,
+                "used_bytes": memory.used,
+                "free_bytes": memory.free,
+                "available_bytes": memory.available,
+                "percent_used": memory.percent,
+                "buffers_bytes": getattr(memory, 'buffers', 0),
+                "cached_bytes": getattr(memory, 'cached', 0),
+                "shared_bytes": getattr(memory, 'shared', 0),
+                # Human readable formats for easier understanding
+                "total_gb": round(memory.total / (1024**3), 2),
+                "used_gb": round(memory.used / (1024**3), 2),
+                "free_gb": round(memory.free / (1024**3), 2),
+                "available_gb": round(memory.available / (1024**3), 2)
             }
 
-            # Swap memory
+            # Swap memory metrics
             swap = psutil.swap_memory()
             swap_data = {
-                "total": swap.total,
-                "used": swap.used,
-                "free": swap.free,
-                "percent": swap.percent
+                "total_bytes": swap.total,
+                "used_bytes": swap.used,
+                "free_bytes": swap.free,
+                "percent_used": swap.percent,
+                "total_gb": round(swap.total / (1024**3), 2) if swap.total > 0 else 0,
+                "used_gb": round(swap.used / (1024**3), 2) if swap.used > 0 else 0,
+                "free_gb": round(swap.free / (1024**3), 2) if swap.free > 0 else 0
             }
 
-            # Disk metrics
-            disk_data = []
-            if self.config['metrics'].get('disk_usage_only', True):
-                # Only collect disk usage for mounted filesystems
-                for partition in psutil.disk_partitions():
-                    try:
-                        usage = psutil.disk_usage(partition.mountpoint)
-                        disk_data.append({
-                            "device": partition.device,
-                            "mountpoint": partition.mountpoint,
-                            "fstype": partition.fstype,
-                            "total": usage.total,
-                            "used": usage.used,
-                            "free": usage.free,
-                            "percent": (usage.used / usage.total) * 100 if usage.total > 0 else 0
-                        })
-                    except (PermissionError, OSError):
-                        # Skip inaccessible partitions
-                        continue
-            else:
-                # Include partition information
-                disk_data = [dict(part._asdict()) for part in psutil.disk_partitions()]
+            # Disk metrics - Assignment requires per filesystem: total, used, free, % used
+            self.logger.debug("Collecting disk metrics", extra={"hostname": hostname, "metric_type": "disk"})
 
+            disk_data = []
+            for partition in psutil.disk_partitions():
+                try:
+                    # Skip special filesystems that don't have meaningful usage stats
+                    if partition.fstype in ['tmpfs', 'devtmpfs', 'squashfs', 'overlay']:
+                        continue
+
+                    usage = psutil.disk_usage(partition.mountpoint)
+
+                    # Assignment requirement: per filesystem with total, used, free, % used
+                    filesystem_data = {
+                        "device": partition.device,
+                        "mountpoint": partition.mountpoint,
+                        "filesystem_type": partition.fstype,
+                        "mount_options": getattr(partition, 'opts', ''),
+
+                        # Raw bytes
+                        "total_bytes": usage.total,
+                        "used_bytes": usage.used,
+                        "free_bytes": usage.free,
+                        "percent_used": round((usage.used / usage.total) * 100, 2) if usage.total > 0 else 0,
+
+                        # Human readable formats
+                        "total_gb": round(usage.total / (1024**3), 2),
+                        "used_gb": round(usage.used / (1024**3), 2),
+                        "free_gb": round(usage.free / (1024**3), 2),
+
+                        # Additional useful metrics
+                        "inodes_total": getattr(usage, 'inodes_total', None),
+                        "inodes_used": getattr(usage, 'inodes_used', None),
+                        "inodes_free": getattr(usage, 'inodes_free', None)
+                    }
+
+                    disk_data.append(filesystem_data)
+
+                except (PermissionError, OSError) as e:
+                    self.logger.warning(f"Cannot access disk {partition.device}: {e}",
+                                      extra={"hostname": hostname, "device": partition.device})
+                    continue
+
+            # Disk I/O statistics
+            try:
+                disk_io = psutil.disk_io_counters()
+                disk_io_data = {
+                    "read_count": disk_io.read_count,
+                    "write_count": disk_io.write_count,
+                    "read_bytes": disk_io.read_bytes,
+                    "write_bytes": disk_io.write_bytes,
+                    "read_time": disk_io.read_time,
+                    "write_time": disk_io.write_time
+                } if disk_io else None
+            except Exception:
+                disk_io_data = None
+
+            # Compile final metrics structure
             metrics = {
                 "timestamp": timestamp,
-                "hostname": psutil.os.uname().nodename,
+                "hostname": hostname,
+                "collection_duration_ms": round((time.time() - start_time) * 1000, 2),
                 "cpu": cpu_data,
                 "memory": memory_data,
                 "swap": swap_data,
-                "disk": disk_data
+                "disk": {
+                    "filesystems": disk_data,
+                    "io_stats": disk_io_data
+                }
             }
 
             # Optional network metrics
             if self.config['metrics'].get('include_network', True):
-                net_io = psutil.net_io_counters()
-                metrics["network"] = {
-                    "bytes_sent": net_io.bytes_sent,
-                    "bytes_recv": net_io.bytes_recv,
-                    "packets_sent": net_io.packets_sent,
-                    "packets_recv": net_io.packets_recv,
-                    "errin": net_io.errin,
-                    "errout": net_io.errout,
-                    "dropin": net_io.dropin,
-                    "dropout": net_io.dropout
-                }
+                self.logger.debug("Collecting network metrics", extra={"hostname": hostname, "metric_type": "network"})
+                try:
+                    net_io = psutil.net_io_counters()
+                    metrics["network"] = {
+                        "bytes_sent": net_io.bytes_sent,
+                        "bytes_recv": net_io.bytes_recv,
+                        "packets_sent": net_io.packets_sent,
+                        "packets_recv": net_io.packets_recv,
+                        "errors_in": net_io.errin,
+                        "errors_out": net_io.errout,
+                        "drops_in": net_io.dropin,
+                        "drops_out": net_io.dropout
+                    }
+                except Exception as e:
+                    self.logger.warning(f"Failed to collect network metrics: {e}",
+                                      extra={"hostname": hostname})
 
             # Optional process metrics (top processes by CPU/memory)
             if self.config['metrics'].get('include_processes', False):
-                processes = []
-                for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
-                    try:
-                        processes.append(proc.info)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
+                self.logger.debug("Collecting process metrics", extra={"hostname": hostname, "metric_type": "processes"})
+                try:
+                    processes = []
+                    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'username']):
+                        try:
+                            proc_info = proc.info
+                            if proc_info['cpu_percent'] > 0 or proc_info['memory_percent'] > 0:
+                                processes.append(proc_info)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
 
-                # Sort by CPU usage and take top 10
-                processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
-                metrics["top_processes"] = processes[:10]
+                    # Sort by CPU usage and take top 10
+                    processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
+                    metrics["top_processes"] = processes[:10]
+                except Exception as e:
+                    self.logger.warning(f"Failed to collect process metrics: {e}",
+                                      extra={"hostname": hostname})
+
+            # Log successful collection
+            collection_time = round((time.time() - start_time) * 1000, 2)
+            self.logger.info("Metrics collection completed successfully", extra={
+                "hostname": hostname,
+                "duration_ms": collection_time,
+                "cpu_cores": len(cpu_per_core),
+                "filesystems_count": len(disk_data),
+                "memory_usage_percent": memory_data["percent_used"]
+            })
 
             return metrics
 
         except Exception as e:
-            self.logger.error(f"Error collecting metrics: {e}")
+            collection_time = round((time.time() - start_time) * 1000, 2)
+            self.logger.error("Critical error during metrics collection", extra={
+                "hostname": hostname,
+                "duration_ms": collection_time,
+                "error_type": type(e).__name__,
+                "error_message": str(e)
+            }, exc_info=True)
+
+            # Return minimal error metrics to maintain data flow
             return {
-                "timestamp": datetime.utcnow().isoformat(),
-                "hostname": psutil.os.uname().nodename,
-                "error": str(e)
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "hostname": hostname,
+                "collection_duration_ms": collection_time,
+                "error": {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "occurred_at": datetime.utcnow().isoformat() + "Z"
+                },
+                "status": "error"
             }
 
     def check_alerts(self, metrics: Dict[str, Any]) -> None:
@@ -277,47 +409,113 @@ class MetricCollector:
         self.logger.info(f"Email alert (not implemented): {message}")
 
     def send_metrics(self) -> bool:
-        """Send metrics to the cloud endpoint with retry logic."""
+        """Send metrics to the cloud endpoint with robust retry logic and structured logging."""
         max_retries = self.config.get('endpoint', {}).get('max_retries', 3)
         retry_delay = self.config.get('endpoint', {}).get('retry_delay', 5)
+        hostname = psutil.os.uname().nodename
 
         for attempt in range(max_retries):
             try:
+                # Collect metrics
+                start_time = time.time()
                 metrics = self.collect_metrics()
+                collection_time = round((time.time() - start_time) * 1000, 2)
 
-                # Check for alerts before sending
-                self.check_alerts(metrics)
+                # Check for alerts before sending (assignment requirement)
+                if not metrics.get('error'):  # Only check alerts if collection was successful
+                    self.check_alerts(metrics)
 
-                # Prepare payload
+                # Prepare payload for cloud ingestion (assignment requirement)
                 payload = {
-                    "hostname": metrics.get("hostname", psutil.os.uname().nodename),
+                    "hostname": metrics.get("hostname", hostname),
                     "metrics": metrics
                 }
 
-                # Send to endpoint
+                # Send to cloud endpoint with structured logging
+                send_start = time.time()
+                self.logger.info("Sending metrics to cloud endpoint", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                    "endpoint_url": self.config["endpoint"]["url"],
+                    "collection_duration_ms": collection_time
+                })
+
                 response = requests.post(
                     self.config["endpoint"]["url"],
                     json=payload,
                     timeout=self.config.get('endpoint', {}).get('timeout', 10),
-                    headers={'Content-Type': 'application/json'}
+                    headers={
+                        'Content-Type': 'application/json',
+                        'User-Agent': f'MetricsCollector/1.0 ({hostname})'
+                    }
                 )
                 response.raise_for_status()
 
-                self.logger.info(f"Metrics sent successfully (attempt {attempt + 1})")
-                self.logger.debug(f"Metrics payload: {json.dumps(payload, indent=2)}")
+                send_time = round((time.time() - send_start) * 1000, 2)
+
+                # Log successful transmission
+                self.logger.info("Metrics sent successfully to cloud endpoint", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "response_status": response.status_code,
+                    "send_duration_ms": send_time,
+                    "total_duration_ms": collection_time + send_time,
+                    "payload_size_bytes": len(json.dumps(payload))
+                })
+
                 return True
 
-            except requests.exceptions.RequestException as e:
-                self.logger.warning(f"Network error on attempt {attempt + 1}/{max_retries}: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                else:
-                    self.logger.error(f"Failed to send metrics after {max_retries} attempts")
+            except requests.exceptions.Timeout as e:
+                self.logger.warning("Request timeout on metrics transmission", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                    "error": str(e),
+                    "will_retry": attempt < max_retries - 1
+                })
+
+            except requests.exceptions.ConnectionError as e:
+                self.logger.warning("Connection error on metrics transmission", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "max_retries": max_retries,
+                    "error": str(e),
+                    "will_retry": attempt < max_retries - 1
+                })
+
+            except requests.exceptions.HTTPError as e:
+                self.logger.error("HTTP error on metrics transmission", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "status_code": e.response.status_code if e.response else None,
+                    "error": str(e),
+                    "will_retry": attempt < max_retries - 1
+                })
 
             except Exception as e:
-                self.logger.error(f"Unexpected error sending metrics: {e}")
+                self.logger.error("Unexpected error sending metrics", extra={
+                    "hostname": hostname,
+                    "attempt": attempt + 1,
+                    "error_type": type(e).__name__,
+                    "error": str(e)
+                }, exc_info=True)
                 break
 
+            # Wait before retry (assignment requirement: robust error handling)
+            if attempt < max_retries - 1:
+                self.logger.info(f"Waiting {retry_delay}s before retry", extra={
+                    "hostname": hostname,
+                    "retry_delay_seconds": retry_delay
+                })
+                time.sleep(retry_delay)
+
+        # All retries exhausted
+        self.logger.error("Failed to send metrics after all retry attempts", extra={
+            "hostname": hostname,
+            "max_retries": max_retries,
+            "endpoint_url": self.config["endpoint"]["url"]
+        })
         return False
 
     def run(self) -> None:

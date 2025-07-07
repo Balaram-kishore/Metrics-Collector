@@ -1,0 +1,132 @@
+version: '3.8'
+
+services:
+  # InfluxDB - Time-series database for metrics storage
+  influxdb:
+    image: influxdb:2.7
+    container_name: metrics-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=metrics-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - metrics-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Metrics Ingestion Service
+  metrics-ingestion:
+    build:
+      context: .
+      target: ingestion
+    container_name: metrics-ingestion
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_TYPE=influxdb
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=my-super-secret-auth-token
+      - INFLUXDB_ORG=metrics-org
+      - INFLUXDB_BUCKET=metrics
+    volumes:
+      - ./logs:/app/logs
+      - ./cloud_ingestion/db_config.json:/app/cloud_ingestion/db_config.json
+    networks:
+      - metrics-network
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Metrics Dashboard
+  metrics-dashboard:
+    build:
+      context: .
+      target: dashboard
+    container_name: metrics-dashboard
+    ports:
+      - "8080:8080"
+    environment:
+      - METRICS_API_URL=http://metrics-ingestion:8000
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - metrics-network
+    depends_on:
+      metrics-ingestion:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Metrics Collector (runs on host network to access system metrics)
+  metrics-collector:
+    build:
+      context: .
+      target: collector
+    container_name: metrics-collector
+    network_mode: host
+    environment:
+      - METRICS_ENDPOINT=http://localhost:8000/ingest
+    volumes:
+      - ./logs:/app/logs
+      - ./metric_collector/config.yaml:/app/metric_collector/config.yaml
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    privileged: true
+    depends_on:
+      metrics-ingestion:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Grafana for advanced dashboards
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: metrics-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./dashboard/grafana_dashboard.json:/var/lib/grafana/dashboards/metrics.json
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - metrics-network
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
+volumes:
+  influxdb_data:
+    driver: local
+  influxdb_config:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  metrics-network:
+    driver: bridge

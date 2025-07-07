@@ -2,23 +2,84 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import uvicorn
 import sqlite3
 import json
 import logging
 import asyncio
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 import threading
 from contextlib import contextmanager
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Import InfluxDB adapter
+try:
+    from influxdb_adapter import InfluxDBAdapter
+    INFLUXDB_AVAILABLE = True
+except ImportError:
+    INFLUXDB_AVAILABLE = False
+    InfluxDBAdapter = None
+
+# Configure structured JSON logging (assignment requirement)
+class JSONFormatter(logging.Formatter):
+    """Custom JSON formatter for structured logging."""
+
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+            "service": "metrics-ingestion"
+        }
+
+        # Add exception info if present
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
+        # Add extra fields if present
+        for key, value in record.__dict__.items():
+            if key not in ['name', 'msg', 'args', 'levelname', 'levelno', 'pathname',
+                          'filename', 'module', 'lineno', 'funcName', 'created',
+                          'msecs', 'relativeCreated', 'thread', 'threadName',
+                          'processName', 'process', 'getMessage', 'exc_info', 'exc_text', 'stack_info']:
+                log_entry[key] = value
+
+        return json.dumps(log_entry)
+
+# Setup structured logging
+def setup_logging():
+    """Setup structured JSON logging for the ingestion service."""
+    # Create logs directory
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+
+    # Configure handlers with JSON formatting
+    file_handler = logging.FileHandler(log_dir / 'metrics_ingestion.log')
+    file_handler.setFormatter(JSONFormatter())
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(JSONFormatter())
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+# Initialize logging
+setup_logging()
 logger = logging.getLogger(__name__)
+logger.info("Metrics ingestion service starting", extra={
+    "service": "metrics-ingestion",
+    "version": "1.0.0"
+})
 
 app = FastAPI(
     title="Metrics Ingestion Service",
@@ -284,69 +345,178 @@ class MetricsDatabase:
             logger.error(f"Error during cleanup: {e}")
             return 0
 
+class DatabaseFactory:
+    """Factory for creating database instances based on configuration."""
+
+    @staticmethod
+    def create_database(config: Dict[str, Any] = None) -> Union[MetricsDatabase, InfluxDBAdapter]:
+        """Create database instance based on configuration."""
+        if config is None:
+            config = {}
+
+        db_type = config.get('type', 'sqlite').lower()
+
+        if db_type == 'influxdb' and INFLUXDB_AVAILABLE:
+            logger.info("Using InfluxDB for time-series storage (assignment requirement)")
+            return InfluxDBAdapter(config.get('influxdb', {}))
+        else:
+            if db_type == 'influxdb' and not INFLUXDB_AVAILABLE:
+                logger.warning("InfluxDB requested but not available, falling back to SQLite")
+            logger.info("Using SQLite for metrics storage")
+            return MetricsDatabase(config.get('sqlite', {}).get('path', 'metrics.db'))
+
+# Load database configuration
+def load_db_config() -> Dict[str, Any]:
+    """Load database configuration from environment or config file."""
+    config = {
+        'type': os.getenv('DB_TYPE', 'sqlite'),
+        'sqlite': {
+            'path': os.getenv('SQLITE_PATH', 'metrics.db')
+        },
+        'influxdb': {
+            'url': os.getenv('INFLUXDB_URL', 'http://localhost:8086'),
+            'token': os.getenv('INFLUXDB_TOKEN'),
+            'org': os.getenv('INFLUXDB_ORG', 'metrics-org'),
+            'bucket': os.getenv('INFLUXDB_BUCKET', 'metrics'),
+            'timeout': int(os.getenv('INFLUXDB_TIMEOUT', '10000'))
+        }
+    }
+
+    # Try to load from config file if it exists
+    config_file = Path('db_config.json')
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                file_config = json.load(f)
+                config.update(file_config)
+        except Exception as e:
+            logger.warning(f"Failed to load database config file: {e}")
+
+    return config
+
 # Global database instance
-db = MetricsDatabase()
+db_config = load_db_config()
+db = DatabaseFactory.create_database(db_config)
 
 # Dependency to get database instance
-def get_database() -> MetricsDatabase:
+def get_database():
     return db
 
 @app.post("/ingest")
 async def ingest_metrics(
     payload: MetricsPayload,
     background_tasks: BackgroundTasks,
-    db: MetricsDatabase = Depends(get_database)
+    db = Depends(get_database)
 ):
-    """Ingest metrics from collectors."""
+    """Ingest metrics from collectors (assignment requirement: HTTP ingestion endpoint)."""
     try:
-        # Store metrics in background
-        success = db.store_metrics(payload)
+        # Log incoming metrics with structured logging
+        logger.info("Received metrics payload", extra={
+            "hostname": payload.hostname,
+            "timestamp": payload.metrics.timestamp,
+            "has_cpu_data": 'cpu' in payload.metrics.dict(),
+            "has_memory_data": 'memory' in payload.metrics.dict(),
+            "has_disk_data": 'disk' in payload.metrics.dict(),
+            "payload_size": len(json.dumps(payload.dict()))
+        })
+
+        # Store metrics based on database type
+        if isinstance(db, InfluxDBAdapter):
+            success = db.store_metrics(payload.hostname, payload.metrics.dict())
+        else:
+            success = db.store_metrics(payload)
 
         if success:
-            logger.info(f"Received metrics from {payload.hostname}")
-            return {"status": "success", "message": "Metrics stored successfully"}
+            logger.info("Metrics stored successfully", extra={
+                "hostname": payload.hostname,
+                "database_type": type(db).__name__
+            })
+            return {
+                "status": "success",
+                "message": "Metrics stored successfully",
+                "hostname": payload.hostname,
+                "timestamp": payload.metrics.timestamp
+            }
         else:
+            logger.error("Failed to store metrics", extra={
+                "hostname": payload.hostname,
+                "database_type": type(db).__name__
+            })
             raise HTTPException(status_code=500, detail="Failed to store metrics")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing metrics: {e}")
+        logger.error("Error processing metrics", extra={
+            "hostname": payload.hostname,
+            "error_type": type(e).__name__,
+            "error": str(e)
+        }, exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/metrics")
 async def get_metrics(
     hostname: Optional[str] = None,
     hours: int = 24,
-    db: MetricsDatabase = Depends(get_database)
+    db = Depends(get_database)
 ):
-    """Retrieve recent metrics."""
+    """Retrieve recent metrics from time-series store."""
     try:
+        logger.info("Retrieving metrics", extra={
+            "hostname": hostname,
+            "hours": hours,
+            "database_type": type(db).__name__
+        })
+
         metrics = db.get_recent_metrics(hostname=hostname, hours=hours)
+
         return {
             "status": "success",
             "count": len(metrics),
-            "metrics": metrics
+            "metrics": metrics,
+            "database_type": type(db).__name__,
+            "query_params": {
+                "hostname": hostname,
+                "hours": hours
+            }
         }
     except Exception as e:
-        logger.error(f"Error retrieving metrics: {e}")
+        logger.error("Error retrieving metrics", extra={
+            "hostname": hostname,
+            "hours": hours,
+            "error": str(e)
+        }, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve metrics")
 
 @app.get("/metrics/summary")
 async def get_metrics_summary(
     hostname: Optional[str] = None,
     hours: int = 24,
-    db: MetricsDatabase = Depends(get_database)
+    db = Depends(get_database)
 ):
     """Get summary statistics for metrics."""
     try:
+        logger.info("Retrieving metrics summary", extra={
+            "hostname": hostname,
+            "hours": hours,
+            "database_type": type(db).__name__
+        })
+
         stats = db.get_summary_stats(hostname=hostname, hours=hours)
+
         return {
             "status": "success",
             "summary": stats,
             "period_hours": hours,
-            "hostname": hostname
+            "hostname": hostname,
+            "database_type": type(db).__name__
         }
     except Exception as e:
-        logger.error(f"Error getting summary: {e}")
+        logger.error("Error getting summary", extra={
+            "hostname": hostname,
+            "hours": hours,
+            "error": str(e)
+        }, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to get summary")
 
 @app.get("/health")

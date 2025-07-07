@@ -8,9 +8,68 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure structured JSON logging (assignment requirement)
+import json
+from pathlib import Path
+from datetime import datetime
+
+class JSONFormatter(logging.Formatter):
+    """Custom JSON formatter for structured logging."""
+
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+            "service": "metrics-dashboard"
+        }
+
+        # Add exception info if present
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+
+        # Add extra fields if present
+        for key, value in record.__dict__.items():
+            if key not in ['name', 'msg', 'args', 'levelname', 'levelno', 'pathname',
+                          'filename', 'module', 'lineno', 'funcName', 'created',
+                          'msecs', 'relativeCreated', 'thread', 'threadName',
+                          'processName', 'process', 'getMessage', 'exc_info', 'exc_text', 'stack_info']:
+                log_entry[key] = value
+
+        return json.dumps(log_entry)
+
+# Setup structured logging
+def setup_logging():
+    """Setup structured JSON logging for the dashboard service."""
+    # Create logs directory
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+
+    # Configure handlers with JSON formatting
+    file_handler = logging.FileHandler(log_dir / 'metrics_dashboard.log')
+    file_handler.setFormatter(JSONFormatter())
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(JSONFormatter())
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+# Initialize logging
+setup_logging()
 logger = logging.getLogger(__name__)
+logger.info("Metrics dashboard service starting", extra={
+    "service": "metrics-dashboard",
+    "version": "1.0.0"
+})
 
 app = FastAPI(title="Metrics Dashboard", description="Real-time system metrics visualization")
 
