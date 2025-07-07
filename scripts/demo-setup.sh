@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 
 # Demo configuration
 DEMO_DIR="/tmp/metrics-collector-demo"
-REPO_URL="https://github.com/your-org/metrics-collector-linux.git"
+REPO_URL="https://github.com/Balaram-kishore/Metrics-Collector-linux.git"
 
 # Logging functions
 log_info() {
